@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RailPlot Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 16px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            background: #f8f9ff;
+            margin-bottom: 20px;
+        }
+        .upload-area:hover { border-color: #764ba2; background: #f0f2ff; }
+        .upload-area.dragover { border-color: #4CAF50; background: #e8f5e9; }
+        input[type="file"] { display: none; }
+        .btn {
+            padding: 12px 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 600;
+            margin: 4px;
+        }
+        .btn:hover { transform: translateY(-2px); }
+        .controls {
+            margin: 20px 0;
+            padding: 16px;
+            background: #f8f9ff;
+            border-radius: 8px;
+            display: none;
+        }
+        .control-group {
+            margin: 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        label { font-weight: 600; min-width: 80px; }
+        input[type="range"] { flex: 1; }
+        input[type="checkbox"] { 
+            width: 20px; 
+            height: 20px; 
+            cursor: pointer; 
+        }
+        #canvas-container {
+            margin-top: 20px;
+            overflow: auto;
+            border-radius: 12px;
+            background: white;
+            display: none;
+            min-height: 600px;
+        }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        #status {
+            margin: 16px 0;
+            padding: 12px;
+            border-radius: 8px;
+            display: none;
+        }
+        .success { background: #e8f5e9; color: #2e7d32; }
+        .error { background: #ffebee; color: #c62828; }
+        .loading { background: #e3f2fd; color: #1976d2; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚂 RailPlot Viewer</h1>
+        <p class="subtitle">PlaDia/RailPlot形式CSVビューアー</p>
+        
+        <div class="upload-area" id="uploadArea">
+            <div style="font-size: 48px; margin-bottom: 16px;">📁</div>
+            <p style="font-size: 18px; font-weight: 600; margin-bottom: 12px;">
+                CSVファイルをドロップまたはクリック
+            </p>
+            <button class="btn" onclick="document.getElementById('fileInput').click()">
+                ファイルを選択
+            </button>
+            <input type="file" id="fileInput" accept=".csv">
+            <p style="color: #666; font-size: 14px; margin-top: 12px;">
+                RailPlot形式のレイアウトCSVファイル
+            </p>
+        </div>
+
+        <div class="controls" id="controls">
+            <div class="control-group">
+                <label>ズーム:</label>
+                <input type="range" id="zoomSlider" min="0.3" max="3" step="0.1" value="1">
+                <span id="zoomValue">100%</span>
+            </div>
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showDesksCheckbox" checked onchange="toggleDesks()">
+                    机を表示
+                </label>
+            </div>
+            <div class="control-group">
+                <button class="btn" onclick="resetView()">表示リセット</button>
+                <button class="btn" onclick="exportImage()">画像として保存</button>
+            </div>
+        </div>
+
+        <div id="status"></div>
+        <div id="canvas-container">
+            <canvas id="canvas"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const SCALE_FACTOR = 0.05;
+        const DESK_SCALE_FACTOR = SCALE_FACTOR * 20;  // 机は20倍
+        
+        let layoutParts = [];
+        let imageCache = {};
+        let scale = 1;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let lastX = 0, lastY = 0;
+        let showDesks = true;
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const canvasContainer = document.getElementById('canvas-container');
+        const controlsDiv = document.getElementById('controls');
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files[0]) loadLayoutFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files[0]) loadLayoutFile(e.target.files[0]);
+        });
+        document.getElementById('zoomSlider').addEventListener('input', (e) => {
+            scale = parseFloat(e.target.value);
+            document.getElementById('zoomValue').textContent = Math.round(scale * 100) + '%';
+            draw();
+        });
+
+        function toggleDesks() {
+            showDesks = document.getElementById('showDesksCheckbox').checked;
+            draw();
+        }
+
+        async function loadLayoutFile(file) {
+            if (!file.name.endsWith('.csv')) {
+                showStatus('CSVファイルを選択してください', 'error');
+                return;
+            }
+
+            showStatus('読み込み中...', 'loading');
+            
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    await parseLayoutCSV(e.target.result);
+                    
+                    if (layoutParts.length === 0) {
+                        showStatus('エラー: パーツが見つかりません', 'error');
+                        return;
+                    }
+                    
+                    await loadImages();
+                    setupCanvas();
+                    draw();
+                    
+                    canvasContainer.style.display = 'block';
+                    controlsDiv.style.display = 'block';
+                    showStatus(`✅ ${file.name} を読み込みました（${layoutParts.length}パーツ）`, 'success');
+                } catch (error) {
+                    showStatus('エラー: ' + error.message, 'error');
+                    console.error(error);
+                }
+            };
+            reader.readAsText(file, 'UTF-8');
+        }
+
+        async function parseLayoutCSV(csvText) {
+            layoutParts = [];
+            const lines = csvText.split('\n');
+            
+            console.log('📄 CSV行数:', lines.length);
+            
+            for (let i = 2; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const parts = line.split(',');
+                if (parts.length < 9) continue;
+                
+                const category = parts[0];
+                const partId = parts[1];
+                const x = parseFloat(parts[3]) || 0;
+                const y = parseFloat(parts[4]) || 0;
+                const angle = parseFloat(parts[5]) || 0;
+                const flipped = parts[6] === 'True';
+                const zOrder = parseInt(parts[8]) || 0;
+                
+                if (category === 'text') continue;
+                
+                layoutParts.push({ category, partId, x, y, angle, flipped, zOrder });
+            }
+            
+            // z-orderで昇順ソート（小さい値が先に描画され下になる）
+            layoutParts.sort((a, b) => a.zOrder - b.zOrder);
+            
+            console.log('✅ パーツ数:', layoutParts.length);
+            const nonDeskParts = layoutParts.filter(p => p.category !== 'desk');
+            if (nonDeskParts.length > 0) {
+                console.log('📊 z-order範囲:', 
+                    Math.min(...nonDeskParts.map(p => p.zOrder)),
+                    '～',
+                    Math.max(...nonDeskParts.map(p => p.zOrder))
+                );
+            }
+        }
+
+        async function loadImages() {
+            const promises = [];
+            const uniqueParts = new Set();
+            let loaded = 0, failed = 0;
+            
+            for (let part of layoutParts) {
+                const key = `${part.category}_${part.partId}`;
+                if (!uniqueParts.has(key) && part.partId) {
+                    uniqueParts.add(key);
+                    promises.push(
+                        loadImage(part.category, part.partId)
+                            .then(() => loaded++)
+                            .catch(() => failed++)
+                    );
+                }
+            }
+            
+            await Promise.all(promises);
+            console.log(`✅ 画像: 成功${loaded}枚, 失敗${failed}枚`);
+        }
+
+        async function loadImage(category, partId) {
+            const key = `${category}_${partId}`;
+            if (imageCache[key]) return;
+            
+            if (partId.includes(':')) {
+                const [addonName, actualPartId] = partId.split(':');
+                const path = `addon/${addonName}/image/${category}/${actualPartId}/${actualPartId}_1.png`;
+                await tryLoadImage(path, key);
+            } else {
+                const path = `image/${category}/${partId}/${partId}_1.png`;
+                await tryLoadImage(path, key);
+            }
+        }
+
+        function tryLoadImage(path, key) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    imageCache[key] = img;
+                    resolve();
+                };
+                img.onerror = () => {
+                    reject();
+                };
+                img.src = path;
+            });
+        }
+
+        function setupCanvas() {
+            if (layoutParts.length === 0) return;
+            
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            
+            for (let part of layoutParts) {
+                const x = part.x * SCALE_FACTOR;
+                const y = part.y * SCALE_FACTOR;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+            
+            const margin = 200;
+            canvas.width = Math.max(1000, maxX - minX + margin * 2);
+            canvas.height = Math.max(800, maxY - minY + margin * 2);
+            
+            offsetX = -minX + margin;
+            offsetY = -minY + margin;
+            
+            console.log('🎨 Canvas:', canvas.width, 'x', canvas.height);
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.scale(scale, scale);
+            
+            // 背景（白）
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
+            
+            let drawn = 0;
+            
+            // 1. 机を最初に描画（最背面）
+            if (showDesks) {
+                for (let part of layoutParts) {
+                    if (part.category === 'desk') {
+                        if (drawPart(part)) drawn++;
+                    }
+                }
+            }
+            
+            // 2. 机以外をz-order順に描画
+            for (let part of layoutParts) {
+                if (part.category !== 'desk') {
+                    if (drawPart(part)) drawn++;
+                }
+            }
+            
+            console.log(`🖼️ 描画: ${drawn}/${layoutParts.length} (机→z-order順)`);
+            ctx.restore();
+        }
+
+        function drawPart(part) {
+            const key = `${part.category}_${part.partId}`;
+            const img = imageCache[key];
+            
+            if (!img) {
+                const x = part.x * SCALE_FACTOR + offsetX;
+                const y = part.y * SCALE_FACTOR + offsetY;
+                ctx.fillStyle = '#ff6b6b';
+                ctx.fillRect(x - 5, y - 5, 10, 10);
+                return false;
+            }
+            
+            ctx.save();
+            
+            const csvX = part.x;
+            const csvY = part.y;
+            const angle = part.angle;
+            const flipped = part.flipped;
+            
+            const imgCenterX = img.width / 2;
+            const imgCenterY = img.height / 2;
+            
+            // 机の場合は特別なスケール処理
+            const partScaleFactor = (part.category === 'desk') ? DESK_SCALE_FACTOR : SCALE_FACTOR;
+            
+            ctx.translate(csvX * SCALE_FACTOR + offsetX, csvY * SCALE_FACTOR + offsetY);
+            ctx.scale(partScaleFactor, partScaleFactor);
+            ctx.translate(imgCenterX, imgCenterY);
+            ctx.rotate((angle * Math.PI) / 180);
+            
+            if (flipped) {
+                ctx.scale(-1, 1);
+            }
+            
+            ctx.translate(-imgCenterX, -imgCenterY);
+            
+            ctx.globalAlpha = 1.0;
+            ctx.drawImage(img, 0, 0);
+            
+            ctx.restore();
+            return true;
+        }
+
+        canvas.addEventListener('mousedown', startDrag);
+        canvas.addEventListener('mousemove', drag);
+        canvas.addEventListener('mouseup', endDrag);
+        canvas.addEventListener('mouseleave', endDrag);
+        canvas.addEventListener('touchstart', (e) => {
+            const touch = e.touches[0];
+            startDrag({ clientX: touch.clientX, clientY: touch.clientY });
+            e.preventDefault();
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            const touch = e.touches[0];
+            drag({ clientX: touch.clientX, clientY: touch.clientY });
+            e.preventDefault();
+        });
+        canvas.addEventListener('touchend', endDrag);
+
+        function startDrag(e) {
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+        }
+        function drag(e) {
+            if (!isDragging) return;
+            offsetX += (e.clientX - lastX) / scale;
+            offsetY += (e.clientY - lastY) / scale;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            draw();
+        }
+        function endDrag() {
+            isDragging = false;
+        }
+        function resetView() {
+            setupCanvas();
+            scale = 1;
+            document.getElementById('zoomSlider').value = 1;
+            document.getElementById('zoomValue').textContent = '100%';
+            draw();
+        }
+        function exportImage() {
+            const link = document.createElement('a');
+            link.download = 'railplot-layout.png';
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = type;
+            statusDiv.style.display = 'block';
+            if (type !== 'loading') {
+                setTimeout(() => statusDiv.style.display = 'none', 5000);
+            }
+        }
+    </script>
+</body>
+</html>
