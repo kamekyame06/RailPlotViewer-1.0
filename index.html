@@ -77,14 +77,21 @@
         }
         #canvas-container {
             margin-top: 20px;
-            overflow: auto;
+            overflow: hidden;
             border-radius: 12px;
             background: white;
             display: none;
             min-height: 600px;
-            touch-action: none; /* ブラウザのデフォルトタッチ動作を無効化 */
+            touch-action: none;
+            position: relative;
         }
-        canvas { display: block; cursor: grab; }
+        canvas { 
+            display: block; 
+            cursor: grab;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
         canvas:active { cursor: grabbing; }
         #status {
             margin: 16px 0;
@@ -99,7 +106,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>🚂 RailPlot Viewer</h1>
+        <h1>RailPlot Viewer</h1>
         <p class="subtitle">PlaDia/RailPlot形式CSVビューアー</p>
         
         <div class="upload-area" id="uploadArea">
@@ -119,7 +126,7 @@
         <div class="controls" id="controls">
             <div class="control-group">
                 <label>ズーム:</label>
-                <input type="range" id="zoomSlider" min="0.3" max="3" step="0.1" value="1">
+                <input type="range" id="zoomSlider" min="0.1" max="3" step="0.05" value="1">
                 <span id="zoomValue">100%</span>
             </div>
             <div class="control-group">
@@ -157,6 +164,8 @@
         let initialPinchDistance = 0;
         let initialScale = 1;
         let isPinching = false;
+        let pinchCenterX = 0;
+        let pinchCenterY = 0;
 
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -210,6 +219,7 @@
                     
                     await loadImages();
                     setupCanvas();
+                    fitToScreen(); // 画面に収める
                     draw();
                     
                     canvasContainer.style.display = 'block';
@@ -226,8 +236,6 @@
         async function parseLayoutCSV(csvText) {
             layoutParts = [];
             const lines = csvText.split('\n');
-            
-            console.log('📄 CSV行数:', lines.length);
             
             for (let i = 2; i < lines.length; i++) {
                 const line = lines[i].trim();
@@ -250,16 +258,6 @@
             }
             
             layoutParts.sort((a, b) => a.zOrder - b.zOrder);
-            
-            console.log('✅ パーツ数:', layoutParts.length);
-            const nonDeskParts = layoutParts.filter(p => p.category !== 'desk');
-            if (nonDeskParts.length > 0) {
-                console.log('📊 z-order範囲:', 
-                    Math.min(...nonDeskParts.map(p => p.zOrder)),
-                    '～',
-                    Math.max(...nonDeskParts.map(p => p.zOrder))
-                );
-            }
         }
 
         async function loadImages() {
@@ -280,7 +278,6 @@
             }
             
             await Promise.all(promises);
-            console.log(`✅ 画像: 成功${loaded}枚, 失敗${failed}枚`);
         }
 
         async function loadImage(category, partId) {
@@ -325,14 +322,33 @@
                 maxY = Math.max(maxY, y);
             }
             
-            const margin = 200;
+            const margin = 100;
             canvas.width = Math.max(1000, maxX - minX + margin * 2);
             canvas.height = Math.max(800, maxY - minY + margin * 2);
             
             offsetX = -minX + margin;
             offsetY = -minY + margin;
+        }
+
+        function fitToScreen() {
+            // コンテナのサイズ
+            const containerWidth = canvasContainer.clientWidth;
+            const containerHeight = canvasContainer.clientHeight;
             
-            console.log('🎨 Canvas:', canvas.width, 'x', canvas.height);
+            // Canvasのサイズ
+            const canvasWidth = canvas.width;
+            const canvasHeight = canvas.height;
+            
+            // 画面に収まるスケールを計算
+            const scaleX = containerWidth / canvasWidth;
+            const scaleY = containerHeight / canvasHeight;
+            scale = Math.min(scaleX, scaleY) * 0.95; // 95%で少し余白を持たせる
+            
+            // スライダーを更新
+            document.getElementById('zoomSlider').value = scale;
+            document.getElementById('zoomValue').textContent = Math.round(scale * 100) + '%';
+            
+            console.log('🎯 初期スケール:', scale.toFixed(2));
         }
 
         function draw() {
@@ -424,6 +440,12 @@
                 isDragging = false;
                 initialPinchDistance = getDistance(e.touches[0], e.touches[1]);
                 initialScale = scale;
+                
+                // ピンチの中心点を計算（Canvas上の座標）
+                const rect = canvas.getBoundingClientRect();
+                pinchCenterX = ((e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left) / scale;
+                pinchCenterY = ((e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top) / scale;
+                
             } else if (e.touches.length === 1) {
                 // 1本指 → ドラッグ開始
                 if (!isPinching) {
@@ -440,14 +462,34 @@
                 // ピンチズーム中
                 const currentDistance = getDistance(e.touches[0], e.touches[1]);
                 const scaleChange = currentDistance / initialPinchDistance;
+                const newScale = Math.max(0.1, Math.min(3, initialScale * scaleChange));
                 
-                scale = Math.max(0.3, Math.min(3, initialScale * scaleChange));
+                // ピンチ中心が画面上の同じ位置に留まるようにオフセットを調整
+                // ワールド座標でのピンチ中心位置は変わらないが、スケールが変わるので
+                // 画面座標での位置を維持するためにオフセットを調整
+                const rect = canvas.getBoundingClientRect();
+                const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+                const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+                
+                // 新しいスケールでの位置
+                const targetCenterX = currentCenterX / newScale;
+                const targetCenterY = currentCenterY / newScale;
+                
+                // オフセットを調整（ピンチ中心が動かないように）
+                offsetX += (targetCenterX - pinchCenterX);
+                offsetY += (targetCenterY - pinchCenterY);
+                
+                pinchCenterX = targetCenterX;
+                pinchCenterY = targetCenterY;
+                
+                scale = newScale;
                 
                 // スライダーも同期
                 document.getElementById('zoomSlider').value = scale;
                 document.getElementById('zoomValue').textContent = Math.round(scale * 100) + '%';
                 
                 draw();
+                
             } else if (e.touches.length === 1 && !isPinching) {
                 // ドラッグ中
                 const touch = e.touches[0];
@@ -498,9 +540,7 @@
         
         function resetView() {
             setupCanvas();
-            scale = 1;
-            document.getElementById('zoomSlider').value = 1;
-            document.getElementById('zoomValue').textContent = '100%';
+            fitToScreen();
             draw();
         }
         
