@@ -107,7 +107,7 @@
 <body>
     <div class="container">
         <h1>RailPlot Viewer</h1>
-        <p class="subtitle">RailPlot形式CSVビューアー</p>
+        <p class="subtitle">PlaDia/RailPlot形式CSVビューアー</p>
         
         <div class="upload-area" id="uploadArea">
             <div style="font-size: 48px; margin-bottom: 16px;">📁</div>
@@ -150,6 +150,26 @@
     <script>
         const SCALE_FACTOR = 0.05;
         const DESK_SCALE_FACTOR = SCALE_FACTOR * 20;
+        
+        // Canvas優先順位（②システム的な重なり）
+        const LAYER_DESK = 0;           // 机（最下層）
+        const LAYER_BELOW = 1;          // 下層に表示
+        const LAYER_NORMAL = 2;         // 通常
+        const LAYER_ABOVE = 3;          // 上層に表示
+        
+        // 上層に表示するパーツID（パーツ登録CSVの[7]列がTRUE）
+        const ABOVE_LAYER_PARTS = new Set([
+            'big_iron_bridge_red_single',
+            'big_iron_bridge_red_double',
+            'tunnel',
+            'extending_tunnel',
+            'garage'
+        ]);
+        
+        // 下層に表示するパーツID（パーツ登録CSVの[6]列がTRUE）
+        const BELOW_LAYER_PARTS = new Set([
+            // 現在該当なし
+        ]);
         
         let layoutParts = [];
         let imageCache = {};
@@ -198,6 +218,23 @@
             showDesks = document.getElementById('showDesksCheckbox').checked;
             draw();
         }
+        
+        // パーツのCanvas優先順位を取得
+        function getCanvasLayer(part) {
+            if (part.category === 'desk') {
+                return LAYER_DESK;
+            }
+            
+            if (ABOVE_LAYER_PARTS.has(part.partId)) {
+                return LAYER_ABOVE;
+            }
+            
+            if (BELOW_LAYER_PARTS.has(part.partId)) {
+                return LAYER_BELOW;
+            }
+            
+            return LAYER_NORMAL;
+        }
 
         async function loadLayoutFile(file) {
             if (!file.name.endsWith('.csv')) {
@@ -219,7 +256,7 @@
                     
                     await loadImages();
                     setupCanvas();
-                    fitToScreen(); // 画面に収める
+                    fitToScreen();
                     draw();
                     
                     canvasContainer.style.display = 'block';
@@ -250,14 +287,33 @@
                 const y = parseFloat(parts[4]) || 0;
                 const angle = parseFloat(parts[5]) || 0;
                 const flipped = parts[6] === 'True';
-                const zOrder = parseInt(parts[8]) || 0;
+                const zIndex = parseInt(parts[8]) || 0;  // ①ユーザーが変更可能な重なり順
                 
                 if (category === 'text') continue;
                 
-                layoutParts.push({ category, partId, x, y, angle, flipped, zOrder });
+                const part = { category, partId, x, y, angle, flipped, zIndex };
+                part.canvasLayer = getCanvasLayer(part);  // ②システム的な重なり順
+                
+                layoutParts.push(part);
             }
             
-            layoutParts.sort((a, b) => a.zOrder - b.zOrder);
+            // 描画順にソート：Canvas優先順位 → zIndex
+            layoutParts.sort((a, b) => {
+                // まずCanvas優先順位で比較
+                if (a.canvasLayer !== b.canvasLayer) {
+                    return a.canvasLayer - b.canvasLayer;
+                }
+                // 同じ優先順位内ではzIndexで比較
+                return a.zIndex - b.zIndex;
+            });
+            
+            console.log('✅ パーツ数:', layoutParts.length);
+            console.log('📊 レイヤー構成:',
+                'DESK=' + layoutParts.filter(p => p.canvasLayer === LAYER_DESK).length,
+                'BELOW=' + layoutParts.filter(p => p.canvasLayer === LAYER_BELOW).length,
+                'NORMAL=' + layoutParts.filter(p => p.canvasLayer === LAYER_NORMAL).length,
+                'ABOVE=' + layoutParts.filter(p => p.canvasLayer === LAYER_ABOVE).length
+            );
         }
 
         async function loadImages() {
@@ -331,24 +387,17 @@
         }
 
         function fitToScreen() {
-            // コンテナのサイズ
             const containerWidth = canvasContainer.clientWidth;
             const containerHeight = canvasContainer.clientHeight;
-            
-            // Canvasのサイズ
             const canvasWidth = canvas.width;
             const canvasHeight = canvas.height;
             
-            // 画面に収まるスケールを計算
             const scaleX = containerWidth / canvasWidth;
             const scaleY = containerHeight / canvasHeight;
-            scale = Math.min(scaleX, scaleY) * 0.95; // 95%で少し余白を持たせる
+            scale = Math.min(scaleX, scaleY) * 0.95;
             
-            // スライダーを更新
             document.getElementById('zoomSlider').value = scale;
             document.getElementById('zoomValue').textContent = Math.round(scale * 100) + '%';
-            
-            console.log('🎯 初期スケール:', scale.toFixed(2));
         }
 
         function draw() {
@@ -359,20 +408,13 @@
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
             
+            // すでにCanvas優先順位→zIndexでソート済みなので、順番に描画
             let drawn = 0;
-            
-            if (showDesks) {
-                for (let part of layoutParts) {
-                    if (part.category === 'desk') {
-                        if (drawPart(part)) drawn++;
-                    }
-                }
-            }
-            
             for (let part of layoutParts) {
-                if (part.category !== 'desk') {
-                    if (drawPart(part)) drawn++;
-                }
+                // 机の表示/非表示
+                if (part.category === 'desk' && !showDesks) continue;
+                
+                if (drawPart(part)) drawn++;
             }
             
             ctx.restore();
@@ -435,19 +477,16 @@
             e.preventDefault();
             
             if (e.touches.length === 2) {
-                // 2本指 → ピンチズーム開始
                 isPinching = true;
                 isDragging = false;
                 initialPinchDistance = getDistance(e.touches[0], e.touches[1]);
                 initialScale = scale;
                 
-                // ピンチの中心点を計算（Canvas上の座標）
                 const rect = canvas.getBoundingClientRect();
                 pinchCenterX = ((e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left) / scale;
                 pinchCenterY = ((e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top) / scale;
                 
             } else if (e.touches.length === 1) {
-                // 1本指 → ドラッグ開始
                 if (!isPinching) {
                     const touch = e.touches[0];
                     startDrag({ clientX: touch.clientX, clientY: touch.clientY });
@@ -459,23 +498,17 @@
             e.preventDefault();
             
             if (e.touches.length === 2 && isPinching) {
-                // ピンチズーム中
                 const currentDistance = getDistance(e.touches[0], e.touches[1]);
                 const scaleChange = currentDistance / initialPinchDistance;
                 const newScale = Math.max(0.1, Math.min(3, initialScale * scaleChange));
                 
-                // ピンチ中心が画面上の同じ位置に留まるようにオフセットを調整
-                // ワールド座標でのピンチ中心位置は変わらないが、スケールが変わるので
-                // 画面座標での位置を維持するためにオフセットを調整
                 const rect = canvas.getBoundingClientRect();
                 const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
                 const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
                 
-                // 新しいスケールでの位置
                 const targetCenterX = currentCenterX / newScale;
                 const targetCenterY = currentCenterY / newScale;
                 
-                // オフセットを調整（ピンチ中心が動かないように）
                 offsetX += (targetCenterX - pinchCenterX);
                 offsetY += (targetCenterY - pinchCenterY);
                 
@@ -484,14 +517,12 @@
                 
                 scale = newScale;
                 
-                // スライダーも同期
                 document.getElementById('zoomSlider').value = scale;
                 document.getElementById('zoomValue').textContent = Math.round(scale * 100) + '%';
                 
                 draw();
                 
             } else if (e.touches.length === 1 && !isPinching) {
-                // ドラッグ中
                 const touch = e.touches[0];
                 drag({ clientX: touch.clientX, clientY: touch.clientY });
             }
