@@ -151,13 +151,11 @@
         const SCALE_FACTOR = 0.05;
         const DESK_SCALE_FACTOR = SCALE_FACTOR * 20;
         
-        // Canvas優先順位（②システム的な重なり）
-        const LAYER_DESK = 0;           // 机（最下層）
-        const LAYER_BELOW = 1;          // 下層に表示
-        const LAYER_NORMAL = 2;         // 通常
-        const LAYER_ABOVE = 3;          // 上層に表示
+        const LAYER_DESK = 0;
+        const LAYER_BELOW = 1;
+        const LAYER_NORMAL = 2;
+        const LAYER_ABOVE = 3;
         
-        // 上層に表示するパーツID（パーツ登録CSVの[7]列がTRUE）
         const ABOVE_LAYER_PARTS = new Set([
             'big_iron_bridge_red_single',
             'big_iron_bridge_red_double',
@@ -166,12 +164,10 @@
             'garage'
         ]);
         
-        // 下層に表示するパーツID（パーツ登録CSVの[6]列がTRUE）
-        const BELOW_LAYER_PARTS = new Set([
-            // 現在該当なし
-        ]);
+        const BELOW_LAYER_PARTS = new Set([]);
         
         let layoutParts = [];
+        let layoutTexts = [];
         let imageCache = {};
         let scale = 1;
         let offsetX = 0;
@@ -180,7 +176,6 @@
         let lastX = 0, lastY = 0;
         let showDesks = true;
         
-        // ピンチズーム用
         let initialPinchDistance = 0;
         let initialScale = 1;
         let isPinching = false;
@@ -219,20 +214,16 @@
             draw();
         }
         
-        // パーツのCanvas優先順位を取得
         function getCanvasLayer(part) {
             if (part.category === 'desk') {
                 return LAYER_DESK;
             }
-            
             if (ABOVE_LAYER_PARTS.has(part.partId)) {
                 return LAYER_ABOVE;
             }
-            
             if (BELOW_LAYER_PARTS.has(part.partId)) {
                 return LAYER_BELOW;
             }
-            
             return LAYER_NORMAL;
         }
 
@@ -249,7 +240,7 @@
                 try {
                     await parseLayoutCSV(e.target.result);
                     
-                    if (layoutParts.length === 0) {
+                    if (layoutParts.length === 0 && layoutTexts.length === 0) {
                         showStatus('エラー: パーツが見つかりません', 'error');
                         return;
                     }
@@ -261,7 +252,7 @@
                     
                     canvasContainer.style.display = 'block';
                     controlsDiv.style.display = 'block';
-                    showStatus(`✅ ${file.name} を読み込みました（${layoutParts.length}パーツ）`, 'success');
+                    showStatus(`✅ ${file.name} を読み込みました（${layoutParts.length}パーツ, ${layoutTexts.length}テキスト）`, 'success');
                 } catch (error) {
                     showStatus('エラー: ' + error.message, 'error');
                     console.error(error);
@@ -272,6 +263,7 @@
 
         async function parseLayoutCSV(csvText) {
             layoutParts = [];
+            layoutTexts = [];
             const lines = csvText.split('\n');
             
             for (let i = 2; i < lines.length; i++) {
@@ -282,38 +274,41 @@
                 if (parts.length < 9) continue;
                 
                 const category = parts[0];
+                
+                // テキストの場合
+                if (category === 'text') {
+                    const text = parts[1] || '';
+                    const x = parseFloat(parts[3]) || 0;
+                    const y = parseFloat(parts[4]) || 0;
+                    const angle = parseFloat(parts[5]) || 0;
+                    const fontSize = parseInt(parts[7]) || 24;
+                    const zIndex = parseInt(parts[8]) || 0;
+                    
+                    layoutTexts.push({ text, x, y, angle, fontSize, zIndex });
+                    continue;
+                }
+                
                 const partId = parts[1];
                 const x = parseFloat(parts[3]) || 0;
                 const y = parseFloat(parts[4]) || 0;
                 const angle = parseFloat(parts[5]) || 0;
                 const flipped = parts[6] === 'True';
-                const zIndex = parseInt(parts[8]) || 0;  // ①ユーザーが変更可能な重なり順
-                
-                if (category === 'text') continue;
+                const zIndex = parseInt(parts[8]) || 0;
                 
                 const part = { category, partId, x, y, angle, flipped, zIndex };
-                part.canvasLayer = getCanvasLayer(part);  // ②システム的な重なり順
+                part.canvasLayer = getCanvasLayer(part);
                 
                 layoutParts.push(part);
             }
             
-            // 描画順にソート：Canvas優先順位 → zIndex
             layoutParts.sort((a, b) => {
-                // まずCanvas優先順位で比較
                 if (a.canvasLayer !== b.canvasLayer) {
                     return a.canvasLayer - b.canvasLayer;
                 }
-                // 同じ優先順位内ではzIndexで比較
                 return a.zIndex - b.zIndex;
             });
             
-            console.log('✅ パーツ数:', layoutParts.length);
-            console.log('📊 レイヤー構成:',
-                'DESK=' + layoutParts.filter(p => p.canvasLayer === LAYER_DESK).length,
-                'BELOW=' + layoutParts.filter(p => p.canvasLayer === LAYER_BELOW).length,
-                'NORMAL=' + layoutParts.filter(p => p.canvasLayer === LAYER_NORMAL).length,
-                'ABOVE=' + layoutParts.filter(p => p.canvasLayer === LAYER_ABOVE).length
-            );
+            console.log('✅ パーツ数:', layoutParts.length, 'テキスト:', layoutTexts.length);
         }
 
         async function loadImages() {
@@ -322,11 +317,11 @@
             let loaded = 0, failed = 0;
             
             for (let part of layoutParts) {
-                const key = `${part.category}_${part.partId}`;
+                const key = `${part.category}_${part.partId}_${part.flipped}`;
                 if (!uniqueParts.has(key) && part.partId) {
                     uniqueParts.add(key);
                     promises.push(
-                        loadImage(part.category, part.partId)
+                        loadImage(part.category, part.partId, part.flipped)
                             .then(() => loaded++)
                             .catch(() => failed++)
                     );
@@ -336,18 +331,23 @@
             await Promise.all(promises);
         }
 
-        async function loadImage(category, partId) {
-            const key = `${category}_${partId}`;
+        async function loadImage(category, partId, flipped) {
+            const key = `${category}_${partId}_${flipped}`;
             if (imageCache[key]) return;
             
+            // 画像ファイル名: flipped=trueなら _inverted.png、falseなら _1.png
+            const filename = flipped ? `${partId}_inverted.png` : `${partId}_1.png`;
+            
+            let basePath;
             if (partId.includes(':')) {
                 const [addonName, actualPartId] = partId.split(':');
-                const path = `addon/${addonName}/image/${category}/${actualPartId}/${actualPartId}_1.png`;
-                await tryLoadImage(path, key);
+                const actualFilename = flipped ? `${actualPartId}_inverted.png` : `${actualPartId}_1.png`;
+                basePath = `addon/${addonName}/image/${category}/${actualPartId}/${actualFilename}`;
             } else {
-                const path = `image/${category}/${partId}/${partId}_1.png`;
-                await tryLoadImage(path, key);
+                basePath = `image/${category}/${partId}/${filename}`;
             }
+            
+            await tryLoadImage(basePath, key);
         }
 
         function tryLoadImage(path, key) {
@@ -365,13 +365,20 @@
         }
 
         function setupCanvas() {
-            if (layoutParts.length === 0) return;
-            
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             
             for (let part of layoutParts) {
                 const x = part.x * SCALE_FACTOR;
                 const y = part.y * SCALE_FACTOR;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+            
+            for (let text of layoutTexts) {
+                const x = text.x * SCALE_FACTOR;
+                const y = text.y * SCALE_FACTOR;
                 minX = Math.min(minX, x);
                 maxX = Math.max(maxX, x);
                 minY = Math.min(minY, y);
@@ -408,20 +415,22 @@
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
             
-            // すでにCanvas優先順位→zIndexでソート済みなので、順番に描画
-            let drawn = 0;
+            // パーツを描画
             for (let part of layoutParts) {
-                // 机の表示/非表示
                 if (part.category === 'desk' && !showDesks) continue;
-                
-                if (drawPart(part)) drawn++;
+                drawPart(part);
+            }
+            
+            // テキストを描画（最前面）
+            for (let text of layoutTexts) {
+                drawText(text);
             }
             
             ctx.restore();
         }
 
         function drawPart(part) {
-            const key = `${part.category}_${part.partId}`;
+            const key = `${part.category}_${part.partId}_${part.flipped}`;
             const img = imageCache[key];
             
             if (!img) {
@@ -437,7 +446,6 @@
             const csvX = part.x;
             const csvY = part.y;
             const angle = part.angle;
-            const flipped = part.flipped;
             
             const imgCenterX = img.width / 2;
             const imgCenterY = img.height / 2;
@@ -449,9 +457,7 @@
             ctx.translate(imgCenterX, imgCenterY);
             ctx.rotate((angle * Math.PI) / 180);
             
-            if (flipped) {
-                ctx.scale(-1, 1);
-            }
+            // flippedの場合は_inverted.pngを使うので、scale(-1,1)は不要
             
             ctx.translate(-imgCenterX, -imgCenterY);
             
@@ -462,13 +468,29 @@
             return true;
         }
 
-        // マウス操作
+        function drawText(textObj) {
+            ctx.save();
+            
+            const x = textObj.x * SCALE_FACTOR + offsetX;
+            const y = textObj.y * SCALE_FACTOR + offsetY;
+            
+            ctx.translate(x, y);
+            ctx.rotate((textObj.angle * Math.PI) / 180);
+            
+            ctx.font = `${textObj.fontSize * SCALE_FACTOR}px sans-serif`;
+            ctx.fillStyle = '#000000';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(textObj.text, 0, 0);
+            
+            ctx.restore();
+        }
+
         canvas.addEventListener('mousedown', startDrag);
         canvas.addEventListener('mousemove', drag);
         canvas.addEventListener('mouseup', endDrag);
         canvas.addEventListener('mouseleave', endDrag);
         
-        // タッチ操作
         canvas.addEventListener('touchstart', handleTouchStart);
         canvas.addEventListener('touchmove', handleTouchMove);
         canvas.addEventListener('touchend', handleTouchEnd);
