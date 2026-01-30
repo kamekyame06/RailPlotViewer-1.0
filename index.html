@@ -307,47 +307,48 @@
                 }
                 return a.zIndex - b.zIndex;
             });
-            
-            console.log('✅ パーツ数:', layoutParts.length, 'テキスト:', layoutTexts.length);
         }
 
         async function loadImages() {
             const promises = [];
             const uniqueParts = new Set();
-            let loaded = 0, failed = 0;
             
             for (let part of layoutParts) {
-                const key = `${part.category}_${part.partId}_${part.flipped}`;
+                const key = `${part.category}_${part.partId}`;
                 if (!uniqueParts.has(key) && part.partId) {
                     uniqueParts.add(key);
-                    promises.push(
-                        loadImage(part.category, part.partId, part.flipped)
-                            .then(() => loaded++)
-                            .catch(() => failed++)
-                    );
+                    promises.push(loadImage(part.category, part.partId));
                 }
             }
             
             await Promise.all(promises);
         }
 
-        async function loadImage(category, partId, flipped) {
-            const key = `${category}_${partId}_${flipped}`;
+        async function loadImage(category, partId) {
+            const key = `${category}_${partId}`;
             if (imageCache[key]) return;
             
-            // 画像ファイル名: flipped=trueなら _inverted.png、falseなら _1.png
-            const filename = flipped ? `${partId}_inverted.png` : `${partId}_1.png`;
-            
             let basePath;
+            let invertedPath;
+            
             if (partId.includes(':')) {
                 const [addonName, actualPartId] = partId.split(':');
-                const actualFilename = flipped ? `${actualPartId}_inverted.png` : `${actualPartId}_1.png`;
-                basePath = `addon/${addonName}/image/${category}/${actualPartId}/${actualFilename}`;
+                basePath = `addon/${addonName}/image/${category}/${actualPartId}/${actualPartId}_1.png`;
+                invertedPath = `addon/${addonName}/image/${category}/${actualPartId}/${actualPartId}_inverted.png`;
             } else {
-                basePath = `image/${category}/${partId}/${filename}`;
+                basePath = `image/${category}/${partId}/${partId}_1.png`;
+                invertedPath = `image/${category}/${partId}/${partId}_inverted.png`;
             }
             
+            // 通常画像を読み込み
             await tryLoadImage(basePath, key);
+            
+            // inverted画像があれば読み込み（失敗してもOK）
+            try {
+                await tryLoadImage(invertedPath, key + '_inverted');
+            } catch (e) {
+                // inverted画像がない場合は無視
+            }
         }
 
         function tryLoadImage(path, key) {
@@ -430,10 +431,23 @@
         }
 
         function drawPart(part) {
-            const key = `${part.category}_${part.partId}_${part.flipped}`;
-            const img = imageCache[key];
+            const key = `${part.category}_${part.partId}`;
+            const invertedKey = key + '_inverted';
             
-            if (!img) {
+            // flipped=trueの場合、_inverted画像があればそれを使用、なければ通常画像を反転
+            let img;
+            let needsFlip = false;
+            
+            if (part.flipped && imageCache[invertedKey]) {
+                // inverted画像がある場合
+                img = imageCache[invertedKey];
+                needsFlip = false;
+            } else if (imageCache[key]) {
+                // 通常画像を使用
+                img = imageCache[key];
+                needsFlip = part.flipped;
+            } else {
+                // 画像が見つからない
                 const x = part.x * SCALE_FACTOR + offsetX;
                 const y = part.y * SCALE_FACTOR + offsetY;
                 ctx.fillStyle = '#ff6b6b';
@@ -457,7 +471,10 @@
             ctx.translate(imgCenterX, imgCenterY);
             ctx.rotate((angle * Math.PI) / 180);
             
-            // flippedの場合は_inverted.pngを使うので、scale(-1,1)は不要
+            // inverted画像がない場合のみscale(-1,1)で反転
+            if (needsFlip) {
+                ctx.scale(-1, 1);
+            }
             
             ctx.translate(-imgCenterX, -imgCenterY);
             
